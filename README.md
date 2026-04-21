@@ -25,13 +25,17 @@ To create a VMware 7 compressed image with VNC connection for inspection and deb
 
 -rw-r--r-- 1 root root 401577984 Apr 16 14:11 VMware-VMvisor-Installer-7.0U3f-20036589.x86_64.iso
 -rw-r--r-- 1 root root 648374272 Sep  3  2025 VMware-VMvisor-Installer-8.0U3e-24677879.x86_64.iso
--rwxr-xr-x 1 root root      5895 Apr 16 12:47 create-esxi-image.sh
--rw-r--r-- 1 root root       657 Sep  4  2025 ks.cfg
+-rw-r--r-- 1 root root 651687936 Apr 20 12:21 VMware-VMvisor-Installer-9.0.0.0.24755229.x86_64.iso
+-rwxr-xr-x 1 root root      7449 Apr 21 17:30 create-esxi-image.sh
+-rw-r--r-- 1 root root       598 Sep  4  2025 ks.cfg
 
 > ./create-esxi-image.sh --vnc --compress ./VMware-VMvisor-Installer-7.0U3f-20036589.x86_64.iso
 
 Create custom ISO image...
 VMware ISO image: ESXI-7.0U3F-20036589-STANDARD.iso
+Create Kickstart USB image...
+mkfs.fat 4.2 (2021-01-31)
+Create QCow2 disk image...
 Install VMware from ISO...
 VNC server running on 0.0.0.0:5900
 Convert and compress VMware disk image (ESXI-7.0U3F-20036589-STANDARD.qcow2)...

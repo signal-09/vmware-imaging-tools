@@ -6,7 +6,7 @@ DEFAULT_QEMU_MEMORY=16G
 DEFAULT_QEMU_SMP=4
 DEFAULT_QEMU_CPU=host
 DEFAULT_QEMU_BIOS=/usr/share/ovmf/OVMF.fd
-ROOT_PASSWORD='P@ssw0rd'
+DEFAULT_ROOT_PASSWORD='P@ssw0rd'
 
 if [ $EUID -ne 0 ]; then
     echo "This script must be run as root" 1>&2
@@ -129,24 +129,22 @@ fi
 
 # Check ISO files
 if [[ -z "$VMWARE_ISO" || ! -f "$VMWARE_ISO" ]]; then
-    BUILD_ISO=True
+    OVERWRITE=True
 elif [[ -n "$VMWARE_ISO" && ! -f "$VMWARE_ISO" ]]; then
-    BUILD_ISO=True
-else
-    BUILD_ISO=$OVERWRITE
+    OVERWRITE=True
 fi
-if [[ $BUILD_ISO == True && -z "$ISO" ]]; then
+if [[ $OVERWRITE == True && -z "$ISO" ]]; then
     echo "No VMware ISO provided" 1>&2
     usage 1>&2
     exit 1
-elif [[ $BUILD_ISO == False && ! -f "$VMWARE_ISO" ]]; then
+elif [[ $OVERWRITE == False && ! -f "$VMWARE_ISO" ]]; then
     echo "No VMware ISO provided" 1>&2
     usage 1>&2
     exit 1
 fi
 
 # Check Kickstart file
-if [[ $BUILD_ISO == True && ! -f "$KS_CFG" ]]; then
+if [[ $OVERWRITE == True && ! -f "$KS_CFG" ]]; then
     echo "Kickstart file not found: $KS_CFG" 1>&2
     usage 1>&2
     exit 1
@@ -159,39 +157,28 @@ if [[ $SIZE -lt 32 ]]; then
     exit 1
 fi
 
-if [[ $BUILD_ISO == True ]]; then
+cleanup() {
+    umount "$TMP_MOUNT_PATH/overlay" "$TMP_MOUNT_PATH/iso" || :
+    rm -rf "$TMP_DISK_IMAGE" "$TMP_MOUNT_PATH" ks.img || :
+} &>/dev/null
+trap cleanup INT ERR EXIT
+
+if [[ $OVERWRITE == True ]]; then
     echo "Create custom ISO image..."
     TMP_DISK_IMAGE=$(/bin/mktemp)
     TMP_MOUNT_PATH=$(/bin/mktemp -d)
     mkdir $TMP_MOUNT_PATH/{iso,upper,workdir,overlay}
-    cleanup() {
-        umount "$TMP_MOUNT_PATH/overlay" || :
-        umount "$TMP_MOUNT_PATH/iso" || :
-        rm -rf "$TMP_DISK_IMAGE" "$TMP_MOUNT_PATH" || :
-    } &>/dev/null
-    trap cleanup INT ERR EXIT
-
     # Mount VMware ISO image
     mount -o loop -r "$ISO" "$TMP_MOUNT_PATH/iso"
 
     eval `blkid -o export $(awk '$2~mount{ print $1 }' mount="$TMP_MOUNT_PATH/iso" /proc/mounts)`
 
-    : ${VMWARE_ISO:="${DISK_NAME:-$LABEL}.iso"}
-
-    IFS='-' read -r OS VERSION BUILD TYPE <<<"$LABEL"
-    IFS='.' read -r MAJOR MINOR <<<"$VERSION"
-
-    INSTALL_OPTIONS="--overwritevmfs --ignoreprereqwarnings --ignoreprereqerrors"
-    [[ $MAJOR -le 7 ]] || INSTALL_OPTIONS="$INSTALL_OPTIONS --forceunsupportedinstall"
-
     mount -t overlay \
           -o lowerdir="$TMP_MOUNT_PATH/iso",upperdir="$TMP_MOUNT_PATH/upper",workdir="$TMP_MOUNT_PATH/workdir" \
           none "$TMP_MOUNT_PATH/overlay"
 
-    export INSTALL_OPTIONS ROOT_PASSWORD
-    envsubst <"$KS_CFG" >"$TMP_MOUNT_PATH/overlay/KS.CFG"
-    sed -e 's|\( *APPEND.*\)|\1 ks=cdrom:/KS.CFG|' -i "$TMP_MOUNT_PATH/overlay/isolinux.cfg"
-    sed -e 's|^kernelopt=.*|kernelopt=ks=cdrom:/KS.CFG|' -i "$TMP_MOUNT_PATH/overlay/efi/boot/boot.cfg"
+    sed -e 's|\( *APPEND.*\)|\1 ks=usb:/KS.CFG|' -i "$TMP_MOUNT_PATH/overlay/isolinux.cfg"
+    sed -e 's|^kernelopt=.*|kernelopt=runweasel ks=usb:/KS.CFG|' -i "$TMP_MOUNT_PATH/overlay/efi/boot/boot.cfg"
 
     # Burn the new ISO
     mkisofs -quiet \
@@ -208,8 +195,9 @@ if [[ $BUILD_ISO == True ]]; then
             -no-emul-boot \
             -o "$TMP_DISK_IMAGE" \
             "$TMP_MOUNT_PATH/overlay"
-
     umount "$TMP_MOUNT_PATH/overlay"
+
+    : ${VMWARE_ISO:="${DISK_NAME:-$LABEL}.iso"}
     mv "$TMP_DISK_IMAGE" "$VMWARE_ISO"
 
     # Clean up ISO tasks
@@ -218,8 +206,33 @@ if [[ $BUILD_ISO == True ]]; then
 else
     eval `blkid -o export "$VMWARE_ISO"`
 fi
-
 echo "VMware ISO image: $VMWARE_ISO"
+
+echo "Create Kickstart USB image..."
+TMP_DISK_IMAGE=$(/bin/mktemp)
+TMP_MOUNT_PATH=$(/bin/mktemp -d)
+
+truncate --size=16M "$TMP_DISK_IMAGE"
+parted -s "$TMP_DISK_IMAGE" mklabel msdos
+parted -s "$TMP_DISK_IMAGE" mkpart primary fat16 1 100%
+mkfs.fat -F 16 --offset 2048 "$TMP_DISK_IMAGE"
+mount -o loop,offset=$[2048*512] "$TMP_DISK_IMAGE" "$TMP_MOUNT_PATH"
+
+IFS='-' read -r OS VERSION BUILD TYPE <<<"$LABEL"
+IFS='.' read -r MAJOR MINOR <<<"$VERSION"
+
+: ${ROOT_PASSWORD:=$DEFAULT_ROOT_PASSWORD}
+INSTALL_OPTIONS="--overwritevmfs --ignoreprereqwarnings --ignoreprereqerrors"
+[[ $MAJOR -le 7 ]] || INSTALL_OPTIONS="$INSTALL_OPTIONS --forceunsupportedinstall"
+
+export INSTALL_OPTIONS ROOT_PASSWORD
+envsubst <"$KS_CFG" >"$TMP_MOUNT_PATH/ks.cfg"
+
+umount "$TMP_MOUNT_PATH"
+mv "$TMP_DISK_IMAGE" ks.img
+
+
+echo "Create QCow2 disk image..."
 QCOW_DISK="${DISK_NAME:-$LABEL}.qcow2"
 
 TMP_DISK_IMAGE=$(/bin/mktemp)
@@ -230,16 +243,22 @@ qemu_system() {
     [[ -c /dev/kvm ]] || ACCEL='tcg'
 
     qemu-system-x86_64 \
-	-accel $ACCEL \
-	-cpu ${QEMU_CPU:-$DEFAULT_QEMU_CPU} \
-	-smp ${QEMU_SMP:-$DEFAULT_QEMU_SMP} \
-	-m ${QEMU_MEMORY:-$DEFAULT_QEMU_MEMORY} \
-	-bios "${QEMU_BIOS:-$DEFAULT_QEMU_BIOS}" \
-        -drive file="$TMP_DISK_IMAGE",index=0,media=disk,format=raw \
-        -drive file="$VMWARE_ISO",index=2,media=cdrom \
+        -accel $ACCEL \
+        -cpu ${QEMU_CPU:-$DEFAULT_QEMU_CPU} \
+        -smp ${QEMU_SMP:-$DEFAULT_QEMU_SMP} \
+        -m ${QEMU_MEMORY:-$DEFAULT_QEMU_MEMORY} \
+        -bios "${QEMU_BIOS:-$DEFAULT_QEMU_BIOS}" \
+        -usb \
+        -device ahci,id=ahci \
+        -drive file="$TMP_DISK_IMAGE",if=none,id=disk0,media=disk,format=raw \
+        -device ide-hd,bus=ahci.0,drive=disk0 \
+        -drive file="$VMWARE_ISO",if=none,id=cd0,media=cdrom,format=raw \
+        -device ide-cd,bus=ahci.1,drive=cd0 \
+        -drive file="ks.img",if=none,id=stick,format=raw \
+        -device usb-storage,bus=usb-bus.0,drive=stick,removable=off \
         -nic user,model=e1000e \
         $DISPLAY \
-	"$@"
+        "$@"
 }
 
 echo "Install VMware from ISO..."
@@ -248,5 +267,3 @@ qemu_system -no-reboot
 
 echo "Convert${COMPRESS+ and compress} VMware disk image ($QCOW_DISK)..."
 qemu-img convert $COMPRESS -p -O qcow2 "$TMP_DISK_IMAGE" "$QCOW_DISK"
-
-rm -rf "$TMP_DISK_IMAGE"
